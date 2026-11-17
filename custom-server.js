@@ -204,6 +204,36 @@ http.createServer = (...args) => {
   return server;
 };
 
+// Self-pinger: hits /api/health every 4 minutes so idle hosts don't spin the
+// instance down. Target resolution order:
+//   SELF_PING_URL (base URL or full /api/health URL) -> RENDER_EXTERNAL_URL -> http://127.0.0.1:$PORT
+// Set SELF_PING_ENABLED=false to turn it off. On hosts that sleep on inactivity
+// (e.g. Render free tier) the target must be the public URL, since a localhost
+// request does not count as inbound traffic.
+const SELF_PING_INTERVAL_MS = 4 * 60 * 1000;
+const SELF_PING_TIMEOUT_MS = 15 * 1000;
+
+function startSelfPinger() {
+  if (String(process.env.SELF_PING_ENABLED || "true").toLowerCase() === "false") return;
+
+  const port = process.env.PORT || "3003";
+  const base = (process.env.SELF_PING_URL || process.env.RENDER_EXTERNAL_URL || `http://127.0.0.1:${port}`).replace(/\/+$/, "");
+  const url = base.endsWith("/api/health") ? base : `${base}/api/health`;
+
+  const ping = async () => {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(SELF_PING_TIMEOUT_MS) });
+      if (!res.ok) console.warn(`[self-ping] ${url} responded ${res.status}`);
+    } catch (error) {
+      console.warn(`[self-ping] ${url} failed: ${error && error.message ? error.message : error}`);
+    }
+  };
+
+  const timer = setInterval(ping, SELF_PING_INTERVAL_MS);
+  timer.unref();
+  console.log(`[self-ping] pinging ${url} every ${SELF_PING_INTERVAL_MS / 60000} minutes`);
+}
+
 if (require.main === module) {
   const standalone = path.join(__dirname, "server.js");
   if (fs.existsSync(standalone)) {
@@ -214,4 +244,6 @@ if (require.main === module) {
     process.argv = [process.argv[0], nextBin, "start", ...process.argv.slice(2)];
     require(nextBin);
   }
+  // Started after the server module loads so PORT defaults are already applied.
+  startSelfPinger();
 }
